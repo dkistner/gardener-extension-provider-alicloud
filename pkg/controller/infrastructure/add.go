@@ -38,13 +38,15 @@ type AddOptions struct {
 	MachineImageOwnerSecretRef *corev1.SecretReference
 	// WhitelistedImageIDs specifies an array of image IDs that will bypass image sharing.
 	WhitelistedImageIDs []string
+	// EnableSshKeyRotation ensures ssh key rotation always succeeds by detaching all VM instances using the old ssh key.
+	EnableSshKeyRotation bool
 }
 
 // AddToManagerWithOptions adds a controller with the given AddOptions to the given manager.
 // The opts.Reconciler is being set with a newly instantiated actuator.
 func AddToManagerWithOptions(mgr manager.Manager, options AddOptions) error {
 	return infrastructure.Add(mgr, infrastructure.AddArgs{
-		Actuator:          NewActuator(options.MachineImageOwnerSecretRef, options.WhitelistedImageIDs),
+		Actuator:          NewActuator(options.MachineImageOwnerSecretRef, options.WhitelistedImageIDs, options.EnableSshKeyRotation),
 		ControllerOptions: options.Controller,
 		Predicates:        infrastructure.DefaultPredicates(options.IgnoreOperationAnnotation),
 		Type:              alicloud.Type,

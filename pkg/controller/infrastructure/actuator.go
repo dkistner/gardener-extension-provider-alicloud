@@ -59,7 +59,7 @@ var StatusTypeMeta = func() metav1.TypeMeta {
 }()
 
 // NewActuator instantiates an actuator with the default dependencies.
-func NewActuator(machineImageOwnerSecretRef *corev1.SecretReference, whitelistedImageIDs []string) infrastructure.Actuator {
+func NewActuator(machineImageOwnerSecretRef *corev1.SecretReference, whitelistedImageIDs []string, enableSshKeyRotation bool) infrastructure.Actuator {
 	return NewActuatorWithDeps(
 		log.Log.WithName("infrastructure-actuator"),
 		alicloudclient.NewClientFactory(),
@@ -212,7 +212,6 @@ func (a *actuator) generateStatus(ctx context.Context, tf terraformer.Terraforme
 		TerraformerOutputKeyVPCID,
 		TerraformerOutputKeyVPCCIDR,
 		TerraformerOutputKeySecurityGroupID,
-		TerraformerOutputKeyKeyPairName,
 	}
 
 	for zoneIndex := range infraConfig.Networks.Zones {
@@ -246,7 +245,6 @@ func (a *actuator) generateStatus(ctx context.Context, tf terraformer.Terraforme
 				},
 			},
 		},
-		KeyPairName:   vars[TerraformerOutputKeyKeyPairName],
 		MachineImages: machineImagesV1alpha1,
 	}, nil
 }
@@ -294,6 +292,40 @@ func (a *actuator) isWhitelistedImageID(imageID string) bool {
 	return false
 }
 
+// ensureOldSSHKeyDetached ensures the compatibility when ssh key is generated in the current cluster via terraform.
+func (a *actuator) ensureOldSSHKeyDetached(ctx context.Context, infra *extensionsv1alpha1.Infrastructure) error {
+
+	if infra.Status.ProviderStatus == nil {
+		return nil
+	}
+
+	infrastructureStatus := &alicloudv1alpha1.InfrastructureStatus{}
+	if _, _, err := a.Decoder().Decode(infra.Status.ProviderStatus.Raw, nil, infrastructureStatus); err != nil {
+		return err
+	}
+
+	// nolint
+	if infrastructureStatus.KeyPairName == "" {
+		return nil
+	}
+
+	_, shootCloudProviderCredentials, err := a.getConfigAndCredentialsForInfra(ctx, infra)
+	if err != nil {
+		return err
+	}
+
+	shootAlicloudECSClient, err := a.newClientFactory.NewECSClient(infra.Spec.Region, shootCloudProviderCredentials.AccessKeyID, shootCloudProviderCredentials.AccessKeySecret)
+	if err != nil {
+		return err
+	}
+
+	a.logger.V(2).Info("Detaching ssh key pair from ECS instances", "keypair", infrastructureStatus.KeyPairName)
+	err = shootAlicloudECSClient.DetachECSInstancesFromSshKey(infrastructureStatus.KeyPairName)
+	a.logger.V(2).Info("Finished detaching ssh key pair from ECS instances", "keypair", infrastructureStatus.KeyPairName)
+
+	return err
+}
+
 // ensureImagesForShootProviderAccount does following things
 // 1. If worker needs an encrypted image, this method will ensure an corresponding encrypted image is copied.
 // 2. If worker needs a plain image, this method will make the corresponding image is visible to shoot's provider account.
@@ -308,19 +340,16 @@ func (a *actuator) ensureImagesForShootProviderAccount(ctx context.Context, infr
 		return nil, err
 	}
 
-	a.logger.Info("Creating Alicloud ECS client for Shoot", "infrastructure", infra.Name)
 	shootAlicloudECSClient, err := a.newClientFactory.NewECSClient(infra.Spec.Region, shootCloudProviderCredentials.AccessKeyID, shootCloudProviderCredentials.AccessKeySecret)
 	if err != nil {
 		return nil, err
 	}
 
-	a.logger.Info("Creating Alicloud ROS client for Shoot", "infrastructure", infra.Name)
 	shootAlicloudROSClient, err := a.newClientFactory.NewROSClient(infra.Spec.Region, shootCloudProviderCredentials.AccessKeyID, shootCloudProviderCredentials.AccessKeySecret)
 	if err != nil {
 		return nil, err
 	}
 
-	a.logger.Info("Creating Alicloud STS client for Shoot", "infrastructure", infra.Name)
 	shootAlicloudSTSClient, err := a.newClientFactory.NewSTSClient(infra.Spec.Region, shootCloudProviderCredentials.AccessKeyID, shootCloudProviderCredentials.AccessKeySecret)
 	if err != nil {
 		return nil, err
@@ -373,6 +402,7 @@ func (a *actuator) ensureEncryptedImageForShootProviderAccount(
 			return nil, errors.Wrapf(err, "could not decode infrastructure status of infrastructure '%s'", kutil.ObjectName(infra))
 		}
 	}
+
 	if machineImage, err := helper.FindMachineImage(infrastructureStatus.MachineImages, worker.Machine.Image.Name, *worker.Machine.Image.Version, true); err == nil {
 		return machineImage, nil
 	}
@@ -422,7 +452,6 @@ func (a *actuator) ensurePlainImageForShootProviderAccount(ctx context.Context, 
 			if _, _, err := a.Decoder().Decode(providerStatus.Raw, nil, infrastructureStatus); err != nil {
 				return nil, errors.Wrapf(err, "could not decode infrastructure status of infrastructure '%s'", kutil.ObjectName(infra))
 			}
-
 			if machineImage, err := helper.FindMachineImage(infrastructureStatus.MachineImages, worker.Machine.Image.Name, *worker.Machine.Image.Version, false); err != nil {
 				return nil, err
 			} else {
@@ -507,6 +536,10 @@ func (a *actuator) reconcile(ctx context.Context, infra *extensionsv1alpha1.Infr
 		return err
 	}
 
+	if err = a.ensureOldSSHKeyDetached(ctx, infra); err != nil {
+		return err
+	}
+
 	if err := tf.InitializeWith(ctx, initializer).Apply(ctx); err != nil {
 		return errors.Wrapf(err, "failed to apply the terraform config")
 	}
@@ -545,7 +578,7 @@ func (a *actuator) cleanupServiceLoadBalancers(ctx context.Context, infra *exten
 	if err != nil {
 		return err
 	}
-	a.logger.Info("Creating Alicloud SLB client for Shoot", "infrastructure", infra.Name)
+
 	shootAlicloudSLBClient, err := a.newClientFactory.NewSLBClient(infra.Spec.Region, shootCloudProviderCredentials.AccessKeyID, shootCloudProviderCredentials.AccessKeySecret)
 	if err != nil {
 		return err
