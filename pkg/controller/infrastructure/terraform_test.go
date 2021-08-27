@@ -110,15 +110,15 @@ var _ = Describe("TerraformChartOps", func() {
 	Describe("#ComputeTerraformerChartValues", func() {
 		It("should compute the terraformer chart values", func() {
 			var (
-				namespace    = "cluster-foo"
-				region       = "region"
+				namespace = "cluster-foo"
+				region    = "region"
 
 				infra = extensionsv1alpha1.Infrastructure{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: namespace,
 					},
 					Spec: extensionsv1alpha1.InfrastructureSpec{
-						Region:       region,
+						Region: region,
 					},
 				}
 
@@ -186,7 +186,7 @@ var _ = Describe("TerraformChartOps", func() {
 				"eip": map[string]interface{}{
 					"internetChargeType": internetChargeType,
 				},
-				"clusterName":  namespace,
+				"clusterName": namespace,
 				"zones": []map[string]interface{}{
 					{
 						"name": zone1Name,
